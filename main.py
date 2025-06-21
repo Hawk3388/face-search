@@ -442,21 +442,37 @@ def show_top_matches(top_matches):
 # 6. Hauptprogramm
 # ----------------------------------------
 if __name__ == "__main__":    # 6.1. Parameter anpassen
-    input_path = "./images/input.jpg"   # Dein Query-Bild
+    # Eingabe des Bildpfads mit Validierung
+    while True:
+        input_path = input("Pfad zum Bild: ")
+        input_path = input_path.replace('"', '').replace(" ", "").strip()
+
+        if os.path.exists(input_path):
+            # Prüfe ob es sich um eine Bilddatei handelt
+            if input_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff')):
+                print(f"✅ Bild gefunden: {input_path}")
+                break
+            else:
+                print(f"❌ Die Datei '{input_path}' ist keine unterstützte Bilddatei!")
+                print("Unterstützte Formate: .jpg, .jpeg, .png, .gif, .bmp, .webp, .tiff")
+                continue
+        else:
+            print(f"❌ Pfad '{input_path}' nicht gefunden!")
+            print(f"Aktuelles Verzeichnis: {os.getcwd()}")
+            print("Verfügbare Bilddateien:")
+            found_images = False
+            for f in os.listdir('.'):
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff')):
+                    print(f"  - {f}")
+                    found_images = True
+            if not found_images:
+                print("  (Keine Bilddateien im aktuellen Verzeichnis gefunden)")
+            print("Bitte geben Sie einen gültigen Pfad ein.\n")
+    
     max_results = 200          # Erhöht für bessere Ergebnisse
     top_k = 10                 # Mehr finale Treffer
-    vgg16_threshold = 0.75     # 85% VGG16-Ähnlichkeit für Vorfilter
+    vgg16_threshold = 0.75     # 75% VGG16-Ähnlichkeit für Vorfilter
     face_threshold = 0.0       # Kein Face-Schwellenwert - alle Gesichter sortieren
-
-    # 6.1.5. Überprüfe Eingabedatei
-    if not os.path.exists(input_path):
-        print(f"Fehler: Eingabedatei '{input_path}' nicht gefunden!")
-        print(f"Aktuelles Verzeichnis: {os.getcwd()}")
-        print("Verfügbare Dateien:")
-        for f in os.listdir('.'):
-            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
-                print(f"  - {f}")
-        exit(1)
     
     print(f"=== Face Search Tool mit PicImageSearch ===")
     print(f"Verwende Eingabebild: {input_path}")
@@ -554,13 +570,19 @@ if __name__ == "__main__":    # 6.1. Parameter anpassen
         print("- Verwenden Sie ein anderes Bild")
         print("- Erhöhen Sie max_results für mehr Kandidaten")
     else:
-        print(f"✅ {len(top_matches)} Matches über {face_threshold*100:.0f}% Gesichtsähnlichkeit gefunden!")
+        print(f"✅ {len(top_matches)} Matches gefunden und nach Gesichtsähnlichkeit sortiert!")
+        print("\n" + "="*80)
+        print("ERGEBNISSE (absteigende Gesichtsähnlichkeit):")
+        print("="*80)
+        
         for idx, (face_similarity, url) in enumerate(top_matches, 1):
             face_similarity_percent = face_similarity * 100
-            print(f"  {idx}: Gesichtsähnlichkeit {face_similarity_percent:.1f}%")
-            print(f"      URL: {url}")
+            print(f"\n🏆 MATCH #{idx}:")
+            print(f"   Gesichtsähnlichkeit: {face_similarity_percent:.1f}%")
+            print(f"   Bild-URL: {url}")
+            print(f"   {'-'*60}")
         
-        print(f"\nBeste Gesichtsübereinstimmung: {top_matches[0][0]*100:.1f}% Ähnlichkeit")
+        print(f"\n✅ Beste Gesichtsübereinstimmung: {top_matches[0][0]*100:.1f}% Ähnlichkeit")
         
         if top_matches[0][0] < 0.90:  # Unter 90%
             print("⚠️ HINWEIS: Auch bei hoher Ähnlichkeit könnten es verschiedene Personen sein.")
