@@ -54,7 +54,6 @@ PicImageSearch==3.12.9
 pillow==11.2.1
 propcache==0.3.2
 protobuf==5.29.5
-psutil==7.0.0
 Pygments==2.19.1
 pyparsing==3.2.3
 pyquery==2.0.1

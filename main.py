@@ -10,7 +10,6 @@ import time
 import requests
 import asyncio
 import aiohttp
-import psutil
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -27,19 +26,11 @@ import face_recognition
 from loguru import logger
 
 # PicImageSearch imports
-from PicImageSearch import Google, Bing, Network
-from PicImageSearch.model import GoogleResponse, BingResponse
-from PicImageSearch.sync import Google as GoogleSync, Bing as BingSync
+from PicImageSearch import Bing, Network
+from PicImageSearch.model import BingResponse
 
 # ----------------------------------------
-# 1. Utility: RAM-Monitoring
-# ----------------------------------------
-def memory_usage_mb():
-    process = psutil.Process(os.getpid())
-    return process.memory_info().rss / (1024 * 1024)
-
-# ----------------------------------------
-# 2. Face Recognition and VGG16-based Feature Extraction
+# 1. Face Recognition and VGG16-based Feature Extraction
 # ----------------------------------------
 
 def get_face_encoding_from_image(image: Image.Image, resize_max=800):
@@ -131,31 +122,6 @@ def get_query_features(input_image_path):
 # 3. PicImageSearch-based Reverse Image Search
 # ----------------------------------------
 
-def extract_urls_from_google_response(resp: GoogleResponse) -> list:
-    """Extracts all image URLs from Google response"""
-    urls = set()
-    
-    # Check available attributes
-    if hasattr(resp, 'results') and resp.results:
-        for item in resp.results:
-            if hasattr(item, 'url') and item.url:
-                urls.add(item.url)
-            if hasattr(item, 'thumbnail') and item.thumbnail:
-                urls.add(item.thumbnail)
-    
-    # Alternative attribute names
-    for attr_name in ['same', 'similar', 'related', 'visually_similar']:
-        if hasattr(resp, attr_name):
-            items = getattr(resp, attr_name)
-            if items:
-                for item in items:
-                    if hasattr(item, 'url') and item.url:
-                        urls.add(item.url)
-                    if hasattr(item, 'thumbnail') and item.thumbnail:
-                        urls.add(item.thumbnail)
-                
-    return list(urls)
-
 def extract_urls_from_bing_response(resp: BingResponse) -> list:
     """Extracts all image URLs from Bing response"""
     urls = set()
@@ -177,31 +143,6 @@ def extract_urls_from_bing_response(resp: BingResponse) -> list:
                 urls.add(item.thumbnail)
                 
     return list(urls)
-
-async def google_reverse_image_search(image_path, max_results=100):
-    """
-    Performs Google Reverse Image Search with PicImageSearch
-    """
-    print(f"[GOOGLE-PIC] === Starting Google Reverse Search ===")
-    print(f"[GOOGLE-PIC] Image Path: {image_path}")
-    print(f"[GOOGLE-PIC] Max Results: {max_results}")
-    
-    try:
-        async with Network(proxies=None) as client:
-            google = Google(client=client)
-            resp = await google.search(file=image_path)
-            
-            print(f"[GOOGLE-PIC] Search URL: {resp.url}")
-            
-            urls = extract_urls_from_google_response(resp)
-            print(f"[GOOGLE-PIC] Found URLs: {len(urls)}")
-            
-            return urls[:max_results]
-            
-    except Exception as e:
-        print(f"[GOOGLE-PIC] ✗ Error: {e}")
-        logger.exception("Error in google_reverse_image_search:")
-        return []
 
 async def bing_reverse_image_search(image_path, max_results=100):
     """
@@ -226,54 +167,6 @@ async def bing_reverse_image_search(image_path, max_results=100):
     except Exception as e:
         print(f"[BING-PIC] ✗ Error: {e}")
         logger.exception("Error in bing_reverse_image_search:")
-        return []
-
-def google_reverse_image_search_sync(image_path, max_results=100):
-    """
-    Synchronous Google Reverse Image Search with PicImageSearch
-    """
-    print(f"[GOOGLE-SYNC] === Starting Google Reverse Search (Sync) ===")
-    print(f"[GOOGLE-SYNC] Image Path: {image_path}")
-    print(f"[GOOGLE-SYNC] Max Results: {max_results}")
-    
-    try:
-        google = GoogleSync(proxies=None)
-        resp = google.search(file=image_path)
-        
-        print(f"[GOOGLE-SYNC] Search URL: {resp.url}")
-        
-        urls = extract_urls_from_google_response(resp)
-        print(f"[GOOGLE-SYNC] Found URLs: {len(urls)}")
-        
-        return urls[:max_results]
-        
-    except Exception as e:
-        print(f"[GOOGLE-SYNC] ✗ Error: {e}")
-        logger.exception("Error in google_reverse_image_search_sync:")
-        return []
-
-def bing_reverse_image_search_sync(image_path, max_results=100):
-    """
-    Synchronous Bing Reverse Image Search with PicImageSearch
-    """
-    print(f"[BING-SYNC] === Starting Bing Reverse Search (Sync) ===")
-    print(f"[BING-SYNC] Image Path: {image_path}")
-    print(f"[BING-SYNC] Max Results: {max_results}")
-    
-    try:
-        bing = BingSync(proxies=None)
-        resp = bing.search(file=image_path)
-        
-        print(f"[BING-SYNC] Search URL: {resp.url}")
-        
-        urls = extract_urls_from_bing_response(resp)
-        print(f"[BING-SYNC] Found URLs: {len(urls)}")
-        
-        return urls[:max_results]
-        
-    except Exception as e:
-        print(f"[BING-SYNC] ✗ Error: {e}")
-        logger.exception("Error in bing_reverse_image_search_sync:")
         return []
 
 async def bing_only_reverse_search(image_path, max_results=200):
