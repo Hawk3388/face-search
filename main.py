@@ -17,11 +17,24 @@ import asyncio
 import aiohttp
 import psutil
 import numpy as np
-import face_recognition
 from PIL import Image
 import matplotlib.pyplot as plt
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, unquote
+from sklearn.metrics.pairwise import cosine_similarity
+
+# TensorFlow imports
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.preprocessing.image import img_to_array
+
+# Face Recognition imports
+import face_recognition
+
+from loguru import logger
+
+# PicImageSearch imports
+from PicImageSearch import Google, Bing, Network
+from PicImageSearch.model import GoogleResponse, BingResponse
+from PicImageSearch.sync import Google as GoogleSync, Bing as BingSync
 
 # ----------------------------------------
 # 1. Utility: RAM-Monitoring
@@ -31,8 +44,9 @@ def memory_usage_mb():
     return process.memory_info().rss / (1024 * 1024)
 
 # ----------------------------------------
-# 2. Face-Encoding extrahieren
+# 2. Gesichtserkennung und VGG16-basierte Feature-Extraktion
 # ----------------------------------------
+
 def get_face_encoding_from_image(image: Image.Image, resize_max=800):
     """
     Erkennt das erste Gesicht in einem PIL-Image und gibt das 128D-Embedding zurück, oder None.
@@ -51,17 +65,17 @@ def get_face_encoding_from_image(image: Image.Image, resize_max=800):
         return None
     return encodings[0]
 
-def get_query_encoding(input_image_path, resize_max=800):
+def get_query_face_encoding(input_image_path, resize_max=800):
     """
     Lädt das Eingabebild, extrahiert und gibt das Face-Encoding zurück.
     """
     if not os.path.exists(input_image_path):
-        print(f"[get_query_encoding] Eingabebild nicht gefunden: {input_image_path}")
+        print(f"[get_query_face_encoding] Eingabebild nicht gefunden: {input_image_path}")
         return None
     try:
         img = Image.open(input_image_path).convert('RGB')
     except Exception as e:
-        print(f"[get_query_encoding] Fehler beim Laden: {e}")
+        print(f"[get_query_face_encoding] Fehler beim Laden: {e}")
         return None
     enc = get_face_encoding_from_image(img, resize_max=resize_max)
     img.close()
@@ -69,119 +83,247 @@ def get_query_encoding(input_image_path, resize_max=800):
         print("Kein Gesicht im Eingabebild erkannt.")
     return enc
 
-# ----------------------------------------
-# 3. Reverse Image Search bei Google (requests-basiert)
-# ----------------------------------------
-def google_reverse_image_search(image_path, user_agent=None, max_results=100):
-    """
-    Führt eine Reverse Image Search bei Google aus, indem das Bild per POST an den Upload-Endpoint gesendet wird.
-    Parst anschließend die Ergebnisseite, um Bild-URLs zu extrahieren.
-    Gibt eine Liste von URLs zurück (bis max_results), meist Thumbnails oder direkte Bild-URLs.
-    """
-    # 3.1. Session mit Headers anlegen
-    session = requests.Session()
-    # Setze User-Agent, falls nicht angegeben
-    if user_agent is None:
-        # Ein häufiger Desktop-User-Agent
-        user_agent = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/90.0.4430.93 Safari/537.36")
-    session.headers.update({
-        "User-Agent": user_agent,
-    })
+# Globales VGG16-Modell
+_vgg16_model = None
 
-    # 3.2. POST an Upload-Endpoint
-    multipart = {
-        'encoded_image': (os.path.basename(image_path), open(image_path, 'rb')),
-        'image_content': ''
-    }
-    # Wichtig: allow_redirects=False, um den Redirect zu erhalten
+def get_vgg16_model():
+    """Lädt das VGG16-Modell einmalig"""
+    global _vgg16_model
+    if _vgg16_model is None:
+        print("Lade VGG16-Modell...")
+        _vgg16_model = VGG16(weights="imagenet", include_top=False, pooling="avg")
+        print("VGG16-Modell geladen!")
+    return _vgg16_model
+
+def extract_vgg16_features(image: Image.Image, target_size=(224, 224)):
+    """
+    Extrahiert VGG16-Features aus einem PIL-Image
+    """
     try:
-        response = session.post(
-            'https://www.google.com/searchbyimage/upload',
-            files=multipart,
-            allow_redirects=False,
-            timeout=15
-        )
+        # Bild auf VGG16-Eingabegröße anpassen
+        img = image.resize(target_size, Image.LANCZOS)
+        img_array = img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        img_array = preprocess_input(img_array)
+        
+        # Features extrahieren
+        model = get_vgg16_model()
+        features = model.predict(img_array, verbose=0)
+        return features.flatten()
     except Exception as e:
-        print(f"[google_reverse_image_search] POST-Fehler: {e}")
-        return []
-    # 3.3. Google antwortet mit Redirect (302) zur Ergebnis-URL
-    if response.status_code != 302 or 'Location' not in response.headers:
-        print(f"[google_reverse_image_search] Unerwartete Antwort: Status {response.status_code}")
-        return []
-    fetch_url = response.headers['Location']
-    # 3.4. GET die Ergebnisseite
+        print(f"Fehler bei Feature-Extraktion: {e}")
+        return None
+
+def get_query_features(input_image_path):
+    """
+    Lädt das Eingabebild und extrahiert VGG16-Features
+    """
+    if not os.path.exists(input_image_path):
+        print(f"[get_query_features] Eingabebild nicht gefunden: {input_image_path}")
+        return None
     try:
-        resp2 = session.get(fetch_url, timeout=15)
+        img = Image.open(input_image_path).convert('RGB')
+        features = extract_vgg16_features(img)
+        img.close()
+        if features is None:
+            print("Fehler bei der Feature-Extraktion vom Eingabebild.")
+        return features
     except Exception as e:
-        print(f"[google_reverse_image_search] GET-Ergebnisseite-Fehler: {e}")
-        return []
-    if resp2.status_code != 200:
-        print(f"[google_reverse_image_search] Fehler beim Laden der Ergebnisseite: Status {resp2.status_code}")
-        return []
-
-    html = resp2.text
-    # 3.5. Parse HTML mit BeautifulSoup
-    soup = BeautifulSoup(html, 'html.parser')
-    image_urls = set()
-
-    # 3.6. Versuche, Bild-URLs aus der Seite zu extrahieren
-    # Google zeigt Thumbnails in <img> mit class "rg_i" oder "t0fcAb" u.a.
-    # Wir suchen nach <img> Tags mit data-src oder src, und ggf. JSON in Seite.
-    # Dies ist best-effort und kann angepasst werden.
-
-    # 3.6.1. Suche nach <img> Tags mit src/data-src
-    for img_tag in soup.find_all('img'):
-        # Manche Thumbnails haben 'data-src' oder 'src'
-        src = img_tag.get('data-src') or img_tag.get('src')
-        if not src:
-            continue
-        # Filtere unwahrscheinliche Mini-Icons
-        if src.startswith('data:'):  # embedded small icons
-            continue
-        # Vollständige URL? Wenn relativ, baue vollständige URL
-        if src.startswith('//'):
-            src = 'https:' + src
-        elif src.startswith('/'):
-            src = urljoin('https://www.google.com', src)
-        # Füge hinzu
-        image_urls.add(src)
-        if len(image_urls) >= max_results:
-            break
-
-    # 3.6.2. Manchmal sind in der Seite JSON-Blöcke mit "ou":"<image_url>"
-    # Wir können nach solchen Mustern suchen:
-    if len(image_urls) < max_results:
-        text = html
-        # Suche rudimentär nach ou":"URL" Mustern
-        import re
-        pattern = re.compile(r'"ou":"([^"]+)"')
-        for match in pattern.finditer(text):
-            url = match.group(1)
-            # Ent-escape
-            url = url.replace('\\u003d', '=').replace('\\u0026', '&')
-            if url.startswith('http'):
-                image_urls.add(url)
-            if len(image_urls) >= max_results:
-                break
-
-    # 3.6.3. Weitere Ansätze: JSON-LD oder Skript-Blöcke parsen, falls erforderlich.
-
-    return list(image_urls)[:max_results]
+        print(f"[get_query_features] Fehler beim Laden: {e}")
+        return None
 
 # ----------------------------------------
-# 4. Sequenzielle Verarbeitung der gefundenen URLs
+# 3. PicImageSearch-basierte Reverse Image Search
 # ----------------------------------------
-async def process_candidate_urls_sequential(urls, query_encoding, top_k=5, resize_max=800):
+
+def extract_urls_from_google_response(resp: GoogleResponse) -> list:
+    """Extrahiert alle Bild-URLs aus der Google-Response"""
+    urls = set()
+    
+    # Prüfe verfügbare Attribute
+    if hasattr(resp, 'results') and resp.results:
+        for item in resp.results:
+            if hasattr(item, 'url') and item.url:
+                urls.add(item.url)
+            if hasattr(item, 'thumbnail') and item.thumbnail:
+                urls.add(item.thumbnail)
+    
+    # Alternative Attribute-Namen  
+    for attr_name in ['same', 'similar', 'related', 'visually_similar']:
+        if hasattr(resp, attr_name):
+            items = getattr(resp, attr_name)
+            if items:
+                for item in items:
+                    if hasattr(item, 'url') and item.url:
+                        urls.add(item.url)
+                    if hasattr(item, 'thumbnail') and item.thumbnail:
+                        urls.add(item.thumbnail)
+                
+    return list(urls)
+
+def extract_urls_from_bing_response(resp: BingResponse) -> list:
+    """Extrahiert alle Bild-URLs aus der Bing-Response"""
+    urls = set()
+    
+    # Pages including
+    if resp.pages_including:
+        for item in resp.pages_including:
+            if hasattr(item, 'image_url') and item.image_url:
+                urls.add(item.image_url)
+            if hasattr(item, 'thumbnail') and item.thumbnail:
+                urls.add(item.thumbnail)
+    
+    # Visual search
+    if resp.visual_search:
+        for item in resp.visual_search:
+            if hasattr(item, 'image_url') and item.image_url:
+                urls.add(item.image_url)
+            if hasattr(item, 'thumbnail') and item.thumbnail:
+                urls.add(item.thumbnail)
+                
+    return list(urls)
+
+async def google_reverse_image_search(image_path, max_results=100):
     """
-    Lädt sequenziell URLs herunter, extrahiert Face-Encoding, vergleicht Distanz.
-    Gibt Liste [(dist, url), ...] sortiert zurück (aufsteigende Distanz).
+    Führt Google Reverse Image Search mit PicImageSearch aus
     """
-    top_matches = []
+    print(f"[GOOGLE-PIC] === Starte Google Reverse Search ===")
+    print(f"[GOOGLE-PIC] Bild-Pfad: {image_path}")
+    print(f"[GOOGLE-PIC] Max Results: {max_results}")
+    
+    try:
+        async with Network(proxies=None) as client:
+            google = Google(client=client)
+            resp = await google.search(file=image_path)
+            
+            print(f"[GOOGLE-PIC] Search URL: {resp.url}")
+            
+            urls = extract_urls_from_google_response(resp)
+            print(f"[GOOGLE-PIC] Gefundene URLs: {len(urls)}")
+            
+            return urls[:max_results]
+            
+    except Exception as e:
+        print(f"[GOOGLE-PIC] ✗ Fehler: {e}")
+        logger.exception("Fehler in google_reverse_image_search:")
+        return []
+
+async def bing_reverse_image_search(image_path, max_results=100):
+    """
+    Führt Bing Reverse Image Search mit PicImageSearch aus
+    """
+    print(f"[BING-PIC] === Starte Bing Reverse Search ===")
+    print(f"[BING-PIC] Bild-Pfad: {image_path}")
+    print(f"[BING-PIC] Max Results: {max_results}")
+    
+    try:
+        async with Network(proxies=None) as client:
+            bing = Bing(client=client)
+            resp = await bing.search(file=image_path)
+            
+            print(f"[BING-PIC] Search URL: {resp.url}")
+            
+            urls = extract_urls_from_bing_response(resp)
+            print(f"[BING-PIC] Gefundene URLs: {len(urls)}")
+            
+            return urls[:max_results]
+            
+    except Exception as e:
+        print(f"[BING-PIC] ✗ Fehler: {e}")
+        logger.exception("Fehler in bing_reverse_image_search:")
+        return []
+
+def google_reverse_image_search_sync(image_path, max_results=100):
+    """
+    Synchrone Google Reverse Image Search mit PicImageSearch
+    """
+    print(f"[GOOGLE-SYNC] === Starte Google Reverse Search (Sync) ===")
+    print(f"[GOOGLE-SYNC] Bild-Pfad: {image_path}")
+    print(f"[GOOGLE-SYNC] Max Results: {max_results}")
+    
+    try:
+        google = GoogleSync(proxies=None)
+        resp = google.search(file=image_path)
+        
+        print(f"[GOOGLE-SYNC] Search URL: {resp.url}")
+        
+        urls = extract_urls_from_google_response(resp)
+        print(f"[GOOGLE-SYNC] Gefundene URLs: {len(urls)}")
+        
+        return urls[:max_results]
+        
+    except Exception as e:
+        print(f"[GOOGLE-SYNC] ✗ Fehler: {e}")
+        logger.exception("Fehler in google_reverse_image_search_sync:")
+        return []
+
+def bing_reverse_image_search_sync(image_path, max_results=100):
+    """
+    Synchrone Bing Reverse Image Search mit PicImageSearch
+    """
+    print(f"[BING-SYNC] === Starte Bing Reverse Search (Sync) ===")
+    print(f"[BING-SYNC] Bild-Pfad: {image_path}")
+    print(f"[BING-SYNC] Max Results: {max_results}")
+    
+    try:
+        bing = BingSync(proxies=None)
+        resp = bing.search(file=image_path)
+        
+        print(f"[BING-SYNC] Search URL: {resp.url}")
+        
+        urls = extract_urls_from_bing_response(resp)
+        print(f"[BING-SYNC] Gefundene URLs: {len(urls)}")
+        
+        return urls[:max_results]
+        
+    except Exception as e:
+        print(f"[BING-SYNC] ✗ Fehler: {e}")
+        logger.exception("Fehler in bing_reverse_image_search_sync:")
+        return []
+
+async def bing_only_reverse_search(image_path, max_results=200):
+    """
+    Führt nur Bing Reverse Search aus (Google entfernt)
+    """
+    print(f"[BING-ONLY] === Starte Bing Reverse Search ===")
+    print(f"[BING-ONLY] Verwende nur Bing mit PicImageSearch")
+    
+    # Bing Search
+    print("\n1. Starte Bing Search...")
+    bing_start = time.time()
+    bing_urls = await bing_reverse_image_search(image_path, max_results)
+    bing_time = time.time() - bing_start
+    print(f"[BING-ONLY] Bing: {len(bing_urls)} URLs in {bing_time:.2f}s")
+    
+    print(f"\n[BING-ONLY] === Bing Search Abgeschlossen ===")
+    print(f"[BING-ONLY] Gesamt URLs: {len(bing_urls)}")
+    
+    return bing_urls
+
+# ----------------------------------------
+# 4. Zweistufige Verarbeitung: VGG16 + Face-Recognition
+# ----------------------------------------
+async def process_candidate_urls_two_stage(urls, query_features, query_face_encoding, vgg16_threshold=0.85, top_k=20):
+    """
+    Zweistufiger Ansatz:
+    1. VGG16-Filter: Bilder mit >85% allgemeiner Ähnlichkeit RAUSFILTERN (zu ähnlich/identisch)
+    2. Face-Recognition: ALLE gefilterten Bilder nach Gesichtsähnlichkeit sortieren
+    
+    Gibt Liste [(face_similarity, url), ...] sortiert zurück (absteigende Gesichtsähnlichkeit).
+    """
+    stage1_candidates = []
+    stage2_matches = []
     timeout = aiohttp.ClientTimeout(total=10)
     connector = aiohttp.TCPConnector(limit_per_host=5)
+    
+    print(f"=== ZWEISTUFIGER FILTER ===")
+    print(f"Stufe 1: VGG16-Filter (ENTFERNT Bilder mit >{vgg16_threshold*100:.0f}% Bildähnlichkeit)")
+    print(f"Stufe 2: Face-Recognition (ALLE verbleibenden Gesichter nach Ähnlichkeit sortieren)")
+    print(f"Verarbeite {len(urls)} URLs...")
+    
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        # STUFE 1: VGG16-Filter (UMGEKEHRT - entfernt zu ähnliche Bilder)
+        print(f"\n--- STUFE 1: VGG16-Filter (entfernt zu ähnliche Bilder) ---")
         for i, url in enumerate(urls):
             try:
                 async with session.get(url) as resp:
@@ -195,27 +337,77 @@ async def process_candidate_urls_sequential(urls, query_encoding, top_k=5, resiz
             except Exception:
                 continue
 
-            enc = get_face_encoding_from_image(img, resize_max=resize_max)
-            img.close()
-            if enc is None:
+            # VGG16-Features extrahieren
+            features = extract_vgg16_features(img)
+            if features is None:
+                img.close()
                 continue
 
-            dist = np.linalg.norm(enc - query_encoding)
-            # Top-K pflegen
-            if len(top_matches) < top_k:
-                top_matches.append((dist, url))
-                top_matches.sort(key=lambda x: x[0])
+            # VGG16-Ähnlichkeit berechnen
+            try:
+                vgg16_similarity = cosine_similarity([query_features], [features])[0][0]
+            except Exception:
+                img.close()
+                continue
+            
+            # Stufe 1 Filter: Nur Bilder UNTER dem VGG16-Schwellenwert (weniger ähnlich)
+            if vgg16_similarity < vgg16_threshold:
+                stage1_candidates.append((vgg16_similarity, url, img))
+                if len(stage1_candidates) % 10 == 0:
+                    print(f"  Stufe 1: {len(stage1_candidates)} Kandidaten behalten (von {i+1} verarbeiteten URLs)")
             else:
-                if dist < top_matches[-1][0]:
-                    top_matches[-1] = (dist, url)
-                    top_matches.sort(key=lambda x: x[0])
+                img.close()
+                # Diese Bilder werden rausgefiltert (zu ähnlich)
 
             # Monitoring
-            if (i + 1) % 20 == 0:
-                print(f"  Verarbeitet {i+1}/{len(urls)} URLs, bester Distanz so weit: {top_matches[0][0]:.3f}, RAM: {memory_usage_mb():.1f} MB")
-            # Optional: Stop-Kriterium, falls dist < Threshold: break
+            if (i + 1) % 50 == 0:
+                print(f"  Verarbeitet {i+1}/{len(urls)} URLs, behalten: {len(stage1_candidates)} (entfernt zu ähnliche)")
 
-    return top_matches
+        print(f"✅ Stufe 1 abgeschlossen: {len(stage1_candidates)} Kandidaten unter {vgg16_threshold*100:.0f}% VGG16-Ähnlichkeit behalten")
+        
+        if not stage1_candidates:
+            print("❌ Alle Bilder waren zu ähnlich zum Original (über dem VGG16-Schwellenwert)!")
+            return []
+
+        # STUFE 2: Face-Recognition auf ALLE gefilterten Kandidaten
+        print(f"\n--- STUFE 2: Face-Recognition (alle Gesichter sortieren) ---")
+        for i, (vgg16_sim, url, img) in enumerate(stage1_candidates):
+            # Face-Encoding extrahieren
+            face_encoding = get_face_encoding_from_image(img)
+            img.close()
+            
+            if face_encoding is None:
+                continue  # Kein Gesicht erkannt
+
+            # Face-Ähnlichkeit berechnen (Distanz -> Ähnlichkeit)
+            try:
+                face_distance = np.linalg.norm(face_encoding - query_face_encoding)
+                face_similarity = 1 / (1 + face_distance)  # Distanz zu Ähnlichkeit konvertieren
+            except Exception:
+                continue
+            
+            # ALLE Gesichter sammeln (kein Schwellenwert)
+            stage2_matches.append((face_similarity, url))
+
+            # Monitoring
+            if (i + 1) % 10 == 0:
+                print(f"  Stufe 2: {i+1}/{len(stage1_candidates)} verarbeitet, Gesichter gefunden: {len(stage2_matches)}")
+
+        # Nach Gesichtsähnlichkeit sortieren (absteigende Reihenfolge)
+        stage2_matches.sort(key=lambda x: x[0], reverse=True)
+        
+        # Top-K begrenzen
+        if len(stage2_matches) > top_k:
+            stage2_matches = stage2_matches[:top_k]
+
+        print(f"✅ Stufe 2 abgeschlossen: {len(stage2_matches)} Gesichter gefunden und sortiert")
+        if stage2_matches:
+            best_face_sim = stage2_matches[0][0] * 100
+            worst_face_sim = stage2_matches[-1][0] * 100
+            print(f"  Beste Gesichtsähnlichkeit: {best_face_sim:.1f}%")
+            print(f"  Schlechteste Gesichtsähnlichkeit: {worst_face_sim:.1f}%")
+        
+        return stage2_matches
 
 # ----------------------------------------
 # 5. Anzeige der Top-Treffer
@@ -249,40 +441,134 @@ def show_top_matches(top_matches):
 # ----------------------------------------
 # 6. Hauptprogramm
 # ----------------------------------------
-if __name__ == "__main__":
-    # 6.1. Parameter anpassen
-    input_path = "input.jpg"   # Dein Query-Gesicht
-    max_results = 100          # Wie viele Bild-URLs wir aus der Google-Ergebnisseite extrahieren
-    top_k = 5                  # Anzahl finaler Treffer
-    resize_max = 800           # Resize vor Face-Erkennung
+if __name__ == "__main__":    # 6.1. Parameter anpassen
+    input_path = "./images/input.jpg"   # Dein Query-Bild
+    max_results = 200          # Erhöht für bessere Ergebnisse
+    top_k = 10                 # Mehr finale Treffer
+    vgg16_threshold = 0.75     # 85% VGG16-Ähnlichkeit für Vorfilter
+    face_threshold = 0.0       # Kein Face-Schwellenwert - alle Gesichter sortieren
 
-    # 6.2. Query-Encoding extrahieren
-    query_enc = get_query_encoding(input_path, resize_max=resize_max)
-    if query_enc is None:
+    # 6.1.5. Überprüfe Eingabedatei
+    if not os.path.exists(input_path):
+        print(f"Fehler: Eingabedatei '{input_path}' nicht gefunden!")
+        print(f"Aktuelles Verzeichnis: {os.getcwd()}")
+        print("Verfügbare Dateien:")
+        for f in os.listdir('.'):
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+                print(f"  - {f}")
         exit(1)
-
-    # 6.3. Reverse Image Search bei Google
-    print("Starte Reverse Image Search bei Google...")
-    urls = google_reverse_image_search(input_path, max_results=max_results)
-    print(f"Extrahierte URLs: {len(urls)}")
-    # Anzeige extrahierter URLs (optional):
-    # for u in urls[:10]:
-    #     print(u)
-
+    
+    print(f"=== Face Search Tool mit PicImageSearch ===")
+    print(f"Verwende Eingabebild: {input_path}")
+    print(f"Dateigröße: {os.path.getsize(input_path)} Bytes")    # 6.2. Query-Features und Face-Encoding extrahieren
+    print("\n=== SCHRITT 1: Query-Bild analysieren ===")
+    
+    # VGG16-Features für Vorfilter
+    query_features = get_query_features(input_path)
+    if query_features is None:
+        print("❌ Fehler bei der VGG16-Feature-Extraktion vom Eingabebild!")
+        exit(1)
+    print("✅ VGG16-Features erfolgreich extrahiert!")
+    
+    # Face-Encoding für finale Gesichtsvergleiche
+    query_face_encoding = get_query_face_encoding(input_path)
+    if query_face_encoding is None:
+        print("❌ Kein Gesicht im Eingabebild erkannt!")
+        exit(1)
+    print("✅ Gesicht erfolgreich erkannt!")    # 6.3. Bing Reverse Image Search (nur Bing)
+    print("\n=== SCHRITT 2: Bing Reverse Image Search ===")
+    print("Verwende PicImageSearch nur mit Bing...")
+    
+    search_start_time = time.time()
+    urls = asyncio.run(bing_only_reverse_search(input_path, max_results=max_results))
+    search_total_time = time.time() - search_start_time
+    
+    print(f"\n[HAUPTPROGRAMM] Bing Search abgeschlossen in {search_total_time:.2f}s")
+    print(f"[HAUPTPROGRAMM] Extrahierte URLs: {len(urls)}")
+    
+    # Analysiere die Suchergebnisse
+    if urls:
+        print(f"\n=== URL-ANALYSE ===")
+        print(f"Erste 10 URLs:")
+        for i, u in enumerate(urls[:10], 1):
+            print(f"  {i:2d}: {u}")
+        if len(urls) > 10:
+            print(f"  ... und {len(urls)-10} weitere URLs")
+        
+        # Domain-Analyse
+        from urllib.parse import urlparse
+        url_domains = {}
+        for url in urls:
+            try:
+                domain = urlparse(url).netloc
+                url_domains[domain] = url_domains.get(domain, 0) + 1
+            except:
+                pass
+        
+        print(f"\nURL-Quellen:")
+        for domain, count in sorted(url_domains.items(), key=lambda x: x[1], reverse=True)[:8]:
+            print(f"  {domain}: {count} URLs")
+    
     if not urls:
-        print("Keine URLs extrahiert, beende.")
+        print("\n❌ KEINE URLs über Bing Reverse Image Search gefunden!")
+        print("Mögliche Ursachen:")
+        print("1. Das Bild ist sehr ungewöhnlich oder nicht im Internet verfügbar")
+        print("2. Die Person ist nicht bekannt genug für Bilddatenbanken")
+        print("3. Bing blockiert unsere Anfragen")
+        print("4. Das Eingabebild hat schlechte Qualität")
+        print("\nEMPFEHLUNGEN:")
+        print("- Verwenden Sie ein anderes Bild der Person")
+        print("- Probieren Sie ein Bild mit besserer Auflösung")
+        print("- Verwenden Sie ein Bild von einer bekannteren Person zum Testen")
         exit(1)
-
-    # 6.4. Sequenzielle Verarbeitung
-    print("Verarbeite URLs sequenziell für Face-Matching...")
-    top_matches = asyncio.run(process_candidate_urls_sequential(urls, query_enc, top_k=top_k, resize_max=resize_max))
+    
+    # 6.4. Zweistufige Verarbeitung: VGG16 + Face-Recognition
+    print("\n=== SCHRITT 3: Zweistufiges Matching ===")
+    print("Verwende VGG16-Vorfilter + Face-Recognition...")
+    matching_start_time = time.time()
+    
+    top_matches = asyncio.run(process_candidate_urls_two_stage(
+        urls, 
+        query_features, 
+        query_face_encoding,
+        vgg16_threshold=vgg16_threshold,
+        top_k=top_k
+    ))
+    
+    matching_total_time = time.time() - matching_start_time
+    print(f"\n[HAUPTPROGRAMM] Zweistufiges Matching abgeschlossen in {matching_total_time:.2f}s")
 
     # 6.5. Ausgabe der Top-K
-    print("Top Matches (aufsteigende Distanz):")
-    for idx, (dist, url) in enumerate(top_matches, 1):
-        print(f"  {idx}: {url} mit Distanz {dist:.3f}")
+    print("\n=== SCHRITT 4: Ergebnisse ===")
+    print(f"=== Top Matches (absteigende Gesichtsähnlichkeit) ===")
+    
+    if not top_matches:
+        print("❌ KEINE MATCHES ÜBER DEN SCHWELLENWERTEN GEFUNDEN!")
+        print("Mögliche Ursachen:")
+        print(f"1. Keine Bilder erreichen den VGG16-Schwellenwert von {vgg16_threshold*100:.0f}% Ähnlichkeit")
+        print(f"2. Keine Gesichter erreichen den Face-Schwellenwert von {face_threshold*100:.0f}% Ähnlichkeit")
+        print("3. Die gefundenen URLs enthalten keine gültigen Bilder oder Gesichter")
+        print("4. Das Query-Bild ist zu spezifisch oder ungewöhnlich")
+        print("\nLÖSUNGSANSÄTZE:")
+        print("- Reduzieren Sie die Schwellenwerte (z.B. VGG16: 60%, Face: 75%)")
+        print("- Verwenden Sie ein anderes Bild")
+        print("- Erhöhen Sie max_results für mehr Kandidaten")
+    else:
+        print(f"✅ {len(top_matches)} Matches über {face_threshold*100:.0f}% Gesichtsähnlichkeit gefunden!")
+        for idx, (face_similarity, url) in enumerate(top_matches, 1):
+            face_similarity_percent = face_similarity * 100
+            print(f"  {idx}: Gesichtsähnlichkeit {face_similarity_percent:.1f}%")
+            print(f"      URL: {url}")
+        
+        print(f"\nBeste Gesichtsübereinstimmung: {top_matches[0][0]*100:.1f}% Ähnlichkeit")
+        
+        if top_matches[0][0] < 0.90:  # Unter 90%
+            print("⚠️ HINWEIS: Auch bei hoher Ähnlichkeit könnten es verschiedene Personen sein.")
+        else:
+            print("✅ Sehr hohe Gesichtsähnlichkeitswerte gefunden!")
 
     # 6.6. Thumbnails anzeigen
+    print("\n=== SCHRITT 5: Thumbnail-Anzeige ===")
     show_top_matches(top_matches)
-
-    print("Fertig.")
+    
+    print("\n✅ Analyse abgeschlossen!")
