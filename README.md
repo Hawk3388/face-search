@@ -43,7 +43,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The program will prompt you for an image path:
+The program will prompt you for an image path. Enter the path to an image containing the person you want to search for:
 
 ```bash
 Path to image: <image-path>
